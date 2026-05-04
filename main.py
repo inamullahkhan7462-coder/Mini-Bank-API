@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 import models, schemas
-from database import SessionLocal, engine
+from database import SessionLocal, engine, Base
 from fastapi.middleware.cors import CORSMiddleware  # <--- Add this import
 import random
 from fastapi.responses import JSONResponse # <--- Add this
@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import APIKeyHeader
 oauth2_scheme = APIKeyHeader(name="Authorization")
+Base.metadata.create_all(bind=engine)
 # Create the FastAPI app
 app = FastAPI(
     title="Inam's Digital Bank API",
