@@ -1,31 +1,24 @@
+import os
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
-# Replace with your actual Postgres credentials
-SQLALCHEMY_DATABASE_URL = "postgresql://postgres:raoinam7462@localhost/mini_bank_db"
-
-engine = create_engine(SQLALCHEMY_DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-import os
-
-# 1. Try to get the link from Render's environment variables
+# 1. DYNAMIC URL: Try to get the Supabase link from Render, otherwise use your local one
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# 2. If it's NOT on Render (like when you are working on your laptop), use your local link
 if not DATABASE_URL:
-    DATABASE_URL = "postgresql://postgres:your_local_password@localhost/minibank"
+    # Use your local database name 'mini_bank_db' here
+    DATABASE_URL = "postgresql://postgres:raoinam7462@localhost/mini_bank_db"
 
-# 3. Fix for Render/SQLAlchemy compatibility
+# 2. RENDER FIX: Ensure the URL starts with 'postgresql://' instead of 'postgres://'
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-# 4. Create the engine using the dynamic URL
+# 3. SETUP ENGINE: Now we create only ONE engine and ONE SessionLocal
 engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# This function will create the tables in Postgres
+# 4. TABLE CREATOR: This will run on Supabase automatically
 def create_tables():
     Base.metadata.create_all(bind=engine)
-
