@@ -1,7 +1,8 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 import models, schemas
 from database import SessionLocal, engine
+from fastapi.middleware.cors import CORSMiddleware  # <--- Add this import
 import random
 from fastapi.responses import JSONResponse # <--- Add this
 from decimal import Decimal
@@ -18,6 +19,13 @@ app = FastAPI(
     title="Inam's Digital Bank API",
     description="A secure Pakistani Fintech API for peer-to-peer transfers and bill payments.",
     version="1.0.0"
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # This allows all websites (like Lovable) to access your API
+    allow_credentials=True,
+    allow_methods=["*"],  # This allows GET, POST, etc.
+    allow_headers=["*"],  # This allows tokens/headers
 )
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
