@@ -246,6 +246,184 @@ def check_daily_limit(db: Session, sender_account_id: int, new_amount: float):
     
 
 
+from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.security import APIKeyHeader
+from sqlalchemy.orm import Session
+from sqlalchemy import func
+from jose import jwt, JWTError
+from datetime import datetime, timedelta
+from decimal import Decimal
+
+# Internal Imports
+import models, schemas
+from database import SessionLocal, engine, Base
+from utils import (
+    hash_password, 
+    verify_password, 
+    create_access_token, 
+    SECRET_KEY, 
+    ALGORITHM
+)
+
+# 1. Database Initialization
+Base.metadata.create_all(bind=engine)
+
+# 2. App Configuration
+app = FastAPI(
+    title="Inam's Digital Bank API",
+    description="A secure Pakistani Fintech API for peer-to-peer transfers and bill payments.",
+    version="1.0.0"
+)
+
+oauth2_scheme = APIKeyHeader(name="Authorization")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# 3. Global Error Handling (Audit Log Style)
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    print(f"ERROR: {exc}") # This helps you see the REAL error in Render logs
+    return JSONResponse(
+        status_code=500,
+        content={"message": "Internal Server Error. Please check logs."},
+    )
+
+# 4. Dependencies
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+def get_current_user(token: str = Depends(oauth2_scheme)):
+    try:
+        # Standard Bearer token handling
+        if token.startswith("Bearer "):
+            token = token.split(" ")[1]
+            
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id: int = payload.get("user_id")
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Invalid token payload")
+        return user_id
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Session expired or invalid")
+
+# 5. Helper Functions
+def check_daily_limit(db: Session, sender_account_id: int, new_amount: float):
+    twenty_four_hours_ago = datetime.now() - timedelta(days=1)
+    total_sent_today = db.query(func.sum(models.Transfer.amount)).filter(
+        models.Transfer.sender_account_id == sender_account_id,
+        models.Transfer.timestamp >= twenty_four_hours_ago
+    ).scalar() or 0
+    
+    limit = 50000.0
+    if (float(total_sent_today) + new_amount) > limit:
+        remaining = limit - float(total_sent_today)
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Daily limit exceeded. You can only send {remaining} PKR more today."
+        )
+
+# 6. API Routes
+@app.post("/signup", response_model=schemas.UserOut)
+def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
+    # Check if user already exists
+    existing_user = db.query(models.User).filter(models.User.email == user.email).first()
+    if existing_user:
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    hashed_pin = hash_password(user.password)
+    new_user = models.User(
+        full_name=user.full_name,
+        email=user.email,
+        phone_number=user.phone_number,
+        password_hash=hashed_pin
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+
+    # Automatically create an Account
+    new_account = models.Account(
+        user_id=new_user.id,
+        account_number=user.phone_number,
+        balance=5000.00, # Bonus for Pakistani users
+        currency="PKR"
+    )
+    db.add(new_account)
+    db.commit()
+
+    return new_user
+
+@app.post("/login", response_model=schemas.Token)
+def login(user_credentials: schemas.UserLogin, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.email == user_credentials.email).first()
+    if not user or not verify_password(user_credentials.password, user.password_hash):
+        raise HTTPException(status_code=403, detail="Invalid Credentials")
+
+    access_token = create_access_token(data={"user_id": user.id})
+    return {"access_token": access_token, "token_type": "bearer"}
+
+@app.get("/balance")
+def check_balance(db: Session = Depends(get_db), current_user_id: int = Depends(get_current_user)):
+    user_account = db.query(models.Account).filter(models.Account.user_id == current_user_id).first()
+    return {
+        "account_holder": user_account.owner.full_name,
+        "account_number": user_account.account_number,
+        "current_balance": user_account.balance,
+        "currency": "PKR"
+    }
+
+@app.post("/transfer")
+def make_transfer(
+    transfer_data: schemas.TransferCreate, 
+    db: Session = Depends(get_db),
+    current_user_id: int = Depends(get_current_user)
+):
+    sender_user = db.query(models.User).filter(models.User.id == current_user_id).first()
+    sender_acc = sender_user.account 
+    
+    check_daily_limit(db, sender_acc.id, transfer_data.amount)
+
+    receiver_acc = db.query(models.Account).filter(
+        models.Account.account_number == transfer_data.receiver_account_number
+    ).first()
+
+    if not receiver_acc:
+        raise HTTPException(status_code=404, detail="Receiver account not found")
+    if sender_acc.id == receiver_acc.id:
+        raise HTTPException(status_code=400, detail="Cannot transfer to self")
+    if sender_acc.balance < transfer_data.amount:
+        raise HTTPException(status_code=400, detail="Insufficient balance")
+
+    sender_acc.balance -= transfer_data.amount
+    receiver_acc.balance += transfer_data.amount
+
+    new_transfer = models.Transfer(
+        sender_account_id=sender_acc.id,
+        receiver_account_id=receiver_acc.id,
+        amount=transfer_data.amount
+    )
+    
+    db.add(new_transfer)
+    db.commit() 
+    db.refresh(sender_acc)
+
+    return {
+        "status": "Success",
+        "remaining_balance": sender_acc.balance
+    }
+
 @app.get("/fetch-bill/{company}/{consumer_id}")
 def fetch_bill(company: str, consumer_id: str, db: Session = Depends(get_db)):
     bill = db.query(models.Bill).filter(
@@ -255,48 +433,26 @@ def fetch_bill(company: str, consumer_id: str, db: Session = Depends(get_db)):
     
     if not bill:
         raise HTTPException(status_code=404, detail="Bill not found")
-    
     return bill
-
-
-
-from decimal import Decimal # Add this to your imports at the top!
 
 @app.post("/pay-bill/{company}/{consumer_id}")
 def pay_utility_bill(company: str, consumer_id: str, db: Session = Depends(get_db), current_user_id: int = Depends(get_current_user)):
-    # 1. Find the bill
     bill = db.query(models.Bill).filter(
         models.Bill.company_name == company.upper(), 
         models.Bill.consumer_id == consumer_id
     ).first()
     
-    if not bill:
-        raise HTTPException(status_code=404, detail="Bill record not found")
-    if bill.is_paid:
-        raise HTTPException(status_code=400, detail="This bill is already paid")
+    if not bill or bill.is_paid:
+        raise HTTPException(status_code=400, detail="Bill unavailable or already paid")
 
-    # 2. Find User Account
     user_acc = db.query(models.Account).filter(models.Account.user_id == current_user_id).first()
-    if not user_acc:
-        raise HTTPException(status_code=404, detail="Account not found")
+    bill_amount = Decimal(str(bill.amount))
 
-    # 3. Convert bill.amount to Decimal for precise banking math
-    bill_amount_decimal = Decimal(str(bill.amount))
+    if user_acc.balance < bill_amount:
+        raise HTTPException(status_code=400, detail="Insufficient balance")
 
-    # 4. Check Balance
-    if user_acc.balance < bill_amount_decimal:
-        raise HTTPException(status_code=400, detail="Insufficient balance to pay this bill")
-
-    # 5. Process Payment
-    user_acc.balance -= bill_amount_decimal
+    user_acc.balance -= bill_amount
     bill.is_paid = True
     
-    # 6. Commit and Refresh
     db.commit()
-    db.refresh(user_acc) # Refresh to get the updated balance from the DB
-
-    return {
-        "status": "Success",
-        "message": f"Successfully paid {bill.amount} PKR to {company}",
-        "new_balance": float(user_acc.balance) # Convert back to float just for the JSON response
-    }
+    return {"status": "Success", "message": f"Paid {bill.amount} PKR to {company}"}
